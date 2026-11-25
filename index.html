@@ -269,7 +269,6 @@
                     <!-- Remote Participant Tile -->
                     <div id="remote-tile" class="relative rounded-2xl overflow-hidden bg-slate-900 border border-slate-800/90 shadow-xl flex items-center justify-center min-h-[240px]">
                         <video id="remote-video" autoplay playsinline class="w-full h-full object-cover"></video>
-                        <audio id="remote-audio-fallback" autoplay playsinline class="hidden"></audio>
 
                         <!-- Waiting / Disconnected Placeholder -->
                         <div id="remote-placeholder-overlay" class="absolute inset-0 bg-slate-900/95 flex flex-col items-center justify-center p-6 text-center gap-3">
@@ -541,7 +540,6 @@
 
             remoteTile: document.getElementById('remote-tile'),
             remoteVideo: document.getElementById('remote-video'),
-            remoteAudioFallback: document.getElementById('remote-audio-fallback'),
             remotePlaceholderOverlay: document.getElementById('remote-placeholder-overlay'),
             remoteAvatarInitials: document.getElementById('remote-avatar-initials'),
             remoteStatusText: document.getElementById('remote-status-text'),
@@ -878,15 +876,7 @@
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
                     video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    }
-                });
-                // Explicitly enable all audio tracks so voice is transmitted immediately
-                stream.getAudioTracks().forEach(track => {
-                    track.enabled = !state.isMicMuted;
+                    audio: true
                 });
                 return stream;
             } catch (err) {
@@ -1062,9 +1052,8 @@
                                 hostMicMuted: state.isMicMuted
                             });
 
-                            // Ensure host explicitly places a media call to the guest peer
-                            const outgoingCall = state.peer.call(conn.peer, state.localStream);
-                            bindMediaCallEvents(outgoingCall);
+                            const call = state.peer.call(conn.peer, state.localStream);
+                            bindMediaCallEvents(call);
                         } else {
                             handlePeerDataMessage(payload);
                         }
@@ -1079,10 +1068,12 @@
             });
 
             state.peer.on('call', (call) => {
-                // Answer incoming guest call with host's live localStream (containing mic audio)
-                state.localStream.getAudioTracks().forEach(t => { t.enabled = !state.isMicMuted; });
-                call.answer(state.localStream);
-                bindMediaCallEvents(call);
+                if (state.dataConn && state.dataConn.peer === call.peer) {
+                    call.answer(state.localStream);
+                    bindMediaCallEvents(call);
+                } else {
+                    call.close();
+                }
             });
 
             state.peer.on('error', (err) => {
@@ -1144,11 +1135,7 @@
                                 els.remoteNameBadge.textContent = payload.hostName || 'Host';
                                 els.remoteAvatarInitials.textContent = getInitials(payload.hostName || 'Host');
                                 updateRemoteMicUI(!!payload.hostMicMuted);
-                                els.connectionStateLabel.textContent = 'Authenticated! Connecting video & audio stream...';
-
-                                // Guest also initiates an outgoing call to Host to guarantee bidirectional tracks
-                                const outgoingCall = guestPeer.call(hostPeerId, state.localStream);
-                                bindMediaCallEvents(outgoingCall);
+                                els.connectionStateLabel.textContent = 'Authenticated! Connecting video stream...';
 
                                 setJoinLoading(false);
                                 resolve();
@@ -1168,7 +1155,6 @@
                 });
 
                 guestPeer.on('call', (call) => {
-                    state.localStream.getAudioTracks().forEach(t => { t.enabled = !state.isMicMuted; });
                     call.answer(state.localStream);
                     bindMediaCallEvents(call);
                 });
@@ -1185,51 +1171,16 @@
         }
 
         function bindMediaCallEvents(call) {
-            if (!call) return;
-            if (state.mediaCall && state.mediaCall !== call) {
+            if (state.mediaCall) {
                 try { state.mediaCall.close(); } catch (e) {}
             }
             state.mediaCall = call;
 
             call.on('stream', (remoteStream) => {
-                if (!remoteStream) return;
                 state.remoteStream = remoteStream;
-
-                // Ensure all incoming remote audio tracks are enabled and unmuted
-                remoteStream.getAudioTracks().forEach(track => {
-                    track.enabled = true;
-                });
-
-                els.remoteVideo.muted = false;
-                els.remoteVideo.volume = 1.0;
                 els.remoteVideo.srcObject = remoteStream;
-
-                // Attach audio tracks to dedicated fallback <audio> element as well
-                if (els.remoteAudioFallback && remoteStream.getAudioTracks().length > 0) {
-                    const audioOnlyStream = new MediaStream(remoteStream.getAudioTracks());
-                    els.remoteAudioFallback.muted = false;
-                    els.remoteAudioFallback.volume = 1.0;
-                    els.remoteAudioFallback.srcObject = audioOnlyStream;
-                    els.remoteAudioFallback.play().catch(() => {});
-                }
-
-                els.remoteVideo.play().catch(() => {
-                    // If browser blocks autoplay with sound, show a quick toast to click anywhere
-                    showToast('Click anywhere on the page to unmute remote audio.', 'warning');
-                    const resumeAudio = () => {
-                        els.remoteVideo.muted = false;
-                        els.remoteVideo.play().catch(() => {});
-                        if (els.remoteAudioFallback) {
-                            els.remoteAudioFallback.muted = false;
-                            els.remoteAudioFallback.play().catch(() => {});
-                        }
-                        document.removeEventListener('click', resumeAudio);
-                    };
-                    document.addEventListener('click', resumeAudio);
-                });
-
                 els.remotePlaceholderOverlay.classList.add('hidden');
-                els.connectionStateLabel.textContent = 'Peer-to-peer encrypted audio & video active';
+                els.connectionStateLabel.textContent = 'Peer-to-peer encrypted connection active';
                 updateGridLayout(true);
                 showToast('Peer connected!', 'success');
             });
